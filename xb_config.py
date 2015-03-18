@@ -16,3 +16,10 @@ state = __id_generator()
 channels = {'general':''}
 timeout_min = 50
 timeout_max = 100
+debug = False
+# Username of bot admin
+admin = ''
+# Username of bot
+name = 'xyebot'
+# Run from beginnig?
+run = False

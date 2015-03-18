@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
-from bottle import Bottle,request
-from threading import Timer
+from threading import Timer, enumerate
 from random import randint
 from time import time
 from json import dumps
 import xb_config as cfg
 import slack_api as sa
 import re
+import sys
 
 
-bottle = Bottle()
-xb_run = False
-oldest = time()
+sa.set_token(cfg.token)
 vow = u'аАеЕёЁиИоОуУыЫэЭюЮяЯ'
 con = u'бБвВгГдДжЖзЗйЙкКлЛмМнНпПрРсСтТфФхХцЦчЧшШщЩъЪьЬ'
 sv = {u'а':u'я',
@@ -24,6 +22,21 @@ sv = {u'а':u'я',
     u'Ы':u'и',
     u'э':u'е',
     u'Э':u'е'}
+
+    
+def find_admin(name):
+    res = sa.users.list()
+    log("users.list: %s" % res)
+    if res['ok']:
+        for user in res['members']:
+            if user['name'] == cfg.admin:
+                return user['id']
+    return None
+
+
+def log(msg):
+    if cfg.debug:
+        print msg
 
 
 def process(msg):
@@ -44,68 +57,88 @@ def process(msg):
     return r
 
 
-def __loop():
-    global oldest
+def process_admin(ch_id, adm_id, msgs):
+    if msgs:
+        msg = msgs.pop() 
+    else:
+        return True
+    r = ''
+    try:
+        if msg['type'] == 'message' and msg['user'] == adm_id and msg['text'].startswith(cfg.name):
+            cmd = msg['text'].split()[1]
+            if cmd == 'start':
+                r = start()
+            elif cmd == 'stop':
+                r = stop()
+            elif cmd == 'debug':
+                cfg.debug = False if cfg.debug else True
+                r = "Debug: %s" % cfg.debug
+    except:
+        r = "Exception: %s (%s)\n%s" % sys.exc_info()
+    if r:
+        log("chat.postMessage: %s" % sa.chat.postMessage({'text':r, 'channel':ch_id, 'username':cfg.name}))
+    process_admin(ch_id, adm_id, msgs)
+
+
+def __admin_loop(ch_id, adm_id, oldest):
+    res = sa.im.history({'channel':ch_id, 'count':10, 'oldest':oldest, 'inclusive':0})
+    log("im.history: %s" % res)
+    if res['ok']:
+        if res['messages']:
+            process_admin(ch_id, adm_id, res['messages'])
+    th = Timer(10, __admin_loop, [ch_id, adm_id, time()])
+    th.setName('admin_loop')
+    th.start()
+    
+
+def __loop(oldest):
     for ch in cfg.channels.values():
-        res = sa.channels.history({'channel':ch,'count':1, 'oldest':oldest, 'inclusive':1})
+        res = sa.channels.history({'channel':ch, 'count':100, 'oldest':oldest, 'inclusive':0})
+        log("channels.history: %s" % res)
         if res['ok']:
             if res['messages']:
                 text = process(res['messages'][0])
+                log("message: %s" % text)
                 if text and isinstance(text, unicode):
                     text = text.encode('utf8')
-                    sa.chat.postMessage({'text':text, 'channel':ch, 'username':'xyebot'})
-    oldest = time()
-    if xb_run:
-        Timer(randint(cfg.timeout_min, cfg.timeout_max), __loop).start()
+                res = sa.chat.postMessage({'text':text, 'channel':ch, 'username':cfg.name})
+                log("chat.postMessage: %s" % res)
+    if cfg.run:
+        th = Timer(randint(cfg.timeout_min, cfg.timeout_max), __loop, [time()])
+        th.setName('loop')
+        th.start()
 
 
-@bottle.route('/oauth', method='GET')
-def auth_error():
-    print "Got error message %s" % request.params.get('error')
-    return 'OK'
-
-
-@bottle.route('/xyebot/start', method='GET')
 def start():
-    global xb_run
-    global oldest
-    if xb_run:
+    if cfg.run:
         return {'ok':False, 'xyebot':'start', 'message':'already started'}
     else:
-        oldest = time()
-        sa.set_token(cfg.token)
         for ch in cfg.channels.keys():
             res = sa.channels.join({'name':ch})
+            log("channel.join: %s" % res)
             if res['ok']:
                 cfg.channels[ch] = res['channel']['id']
-        xb_run = True
-        Timer(randint(cfg.timeout_min, cfg.timeout_max), __loop).start()
+        cfg.run = True
+        __loop(time())
         return {'ok':True, 'xyebot':'start'}
 
 
-@bottle.route('/xyebot/stop', method='GET')
 def stop():
-    global xb_run
-    if xb_run :
-        sa.set_token('')
-        xb_run = False
+    if cfg.run:
+        for th in enumerate():
+            if th.getName() == 'loop':
+                th.cancel()
+        cfg.run = False
         return {'ok':True, 'xyebot':'stop'}
     else:
         return {'ok':True, 'xyebot':'stop', 'message':'already stopped'}
 
-#@bottle.route('/xyebot/<ticker>', method='GET')
-#def price(ticker):
-#    pass
-#  return { 'text': print_results(get_ticker(ticker)) }
-
-
-# Define an handler for 404 errors.
-@bottle.error(404)
-def error_404(error):
-    """Return a custom 404 error."""
-    return 'Sorry, nothing at this URL.'
-
 
 if __name__ == '__main__':
-    print 'Starting XYEbot'
-    bottle.run()
+    log('Starting XYEbot')
+    admin_id = find_admin(cfg.admin)
+    if admin_id:
+        res = sa.im.open({'user':admin_id})
+        log("im.open: %s" % res)
+        if res['ok']:
+            __admin_loop(res['channel']['id'], admin_id, time())
